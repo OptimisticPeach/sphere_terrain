@@ -135,12 +135,12 @@ impl World {
         };
 
         while self.simulate_water_step(&mut drop, &mut alloc, points) {}
+
+        // println!("{:?}", drop.sediment);
     }
 
     fn simulate_water_step(&mut self, drop: &mut Drop, alloc: &mut Vec<(usize, f32)>, points: &mut Vec<Vec3>) -> bool {
-        points.push(drop.pos * drop.height);
         let gradient = self.gradient_at(drop.triangle, drop.bary);
-
 
         let new_dir = drop.dir * self.settings.inertia - gradient * (1.0 - self.settings.inertia);
 
@@ -169,7 +169,8 @@ impl World {
                 let to_deposit = drop.sediment * self.settings.deposition;
                 self.deposit(drop.triangle, drop.bary, to_deposit);
             } else {
-                let to_erode = (capacity - drop.sediment) * self.settings.erosion;
+                let hardness = self.hardness_at(drop.triangle, drop.bary);
+                let to_erode = (capacity - drop.sediment) * hardness;
                 // println!("erosion: {}, to_erode: {}, height_diff: {}", self.settings.erosion, to_erode, height_diff);
                 let to_erode = to_erode.min(-height_diff);
                 self.erode(drop.pos, drop.triangle[0],to_erode, alloc);
@@ -220,7 +221,11 @@ impl World {
                             continue 'outer;
                         }
                     }
-                    let factor = threshold - self.positions[neighbour].dot(at).recip() - 1.0;
+                    let scale = self.positions[neighbour].dot(at).recip();
+                    let dist = (scale * scale - 1.0).sqrt();
+                    let factor = threshold - dist;
+                    // let actual_dist = at.distance(self.positions[neighbour] * scale);
+                    // println!("factor {} dist {} scale {} actual {} diff_dist: {}", factor, dist, scale, actual_dist, dist - actual_dist);
                     if factor > 0.0 {
                         alloc.push((neighbour, factor));
                         acc += factor;
@@ -232,6 +237,7 @@ impl World {
         }
 
         let norm_factor = acc.recip() * amount;
+        // println!("alloc: {:?}", alloc.len());
         alloc
             .drain(..)
             .for_each(|(idx, factor)| {
@@ -320,6 +326,13 @@ impl World {
         triangle.iter()
             .zip(bary)
             .map(|(x, y)| self.heights[*x] * y)
+            .sum()
+    }
+
+    pub fn hardness_at(&self, triangle: [usize; 3], bary: [f32; 3]) -> f32 {
+        triangle.iter()
+            .zip(bary)
+            .map(|(x, y)| self.hardness[*x] * y)
             .sum()
     }
 }

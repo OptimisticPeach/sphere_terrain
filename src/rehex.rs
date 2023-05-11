@@ -94,7 +94,6 @@ pub fn rehexed(indices: &[u32], len: usize) -> Vec<ArrayVec<[usize; 6]>> {
                         *state = RehexState::Complete;
                     }
                 } else {
-                    //if result[0] == c {
                     if result[4] == b {
                         result.pop();
                         let temp = result.pop().unwrap();

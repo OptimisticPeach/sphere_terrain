@@ -1,5 +1,7 @@
 #![feature(portable_simd)]
 
+// use std::collections::HashSet;
+// use fxhash::FxBuildHasher;
 use glam::Vec3;
 use hexasphere::shapes::IcoSphere;
 use serde::{Deserialize, Serialize};
@@ -57,7 +59,6 @@ struct Drop {
     height: f32,
     triangle: [usize; 3],
     bary: [f32; 3],
-    lifetime: usize,
 }
 
 pub struct World {
@@ -100,6 +101,7 @@ impl World {
             subdivisions,
             min_dist,
             settings,
+
             debug_drop: Vec3::ZERO,
         }
     }
@@ -112,7 +114,22 @@ impl World {
         self.hardness = noisegen::sample_all_noise(&self.positions, opts);
     }
 
-    pub fn simulate_water_drop(&mut self, start: Vec3, points: &mut Vec<Vec3>) {
+    pub fn fill_wetness(&mut self) {
+        self.wetness
+            .iter_mut()
+            .for_each(|x| *x = 0.0);
+
+        let mut old_pos = 0;
+        for i in 0..self.positions.len() {
+            let mut pos = self.positions[i];
+            let mut dir = Vec3::ZERO;
+            for _ in 0..self.settings.max_steps {
+                self.simulate_noneroding_step(&mut pos, &mut dir, &mut old_pos);
+            }
+        }
+    }
+
+    pub fn simulate_water_drop(&mut self, start: Vec3) {
         // let start = self.debug_drop.normalize();
         let start = start.normalize();
         assert!(start.is_normalized());
@@ -121,7 +138,6 @@ impl World {
         let start_bary = self.barycentric_coords(start, start_triangle);
         let start_height = self.height_at(start_triangle, start_bary);
 
-        let mut alloc = Vec::new();
         let mut drop = Drop {
             pos: start,
             dir: Vec3::ZERO,
@@ -131,118 +147,75 @@ impl World {
             height: start_height,
             triangle: start_triangle,
             bary: start_bary,
-            lifetime: 0,
         };
 
-        while self.simulate_water_step(&mut drop, &mut alloc, points) {}
+        for _ in 0..self.settings.max_steps {
+            let gradient = self.gradient_at(drop.triangle, drop.bary);
 
-        // println!("{:?}", drop.sediment);
+            let new_dir = (drop.dir * self.settings.inertia - gradient * (1.0 - self.settings.inertia)).normalize_or_zero();
+
+            let new_pos = (drop.pos + new_dir * self.min_dist).normalize();
+            let new_triangle = self.find_triangle(drop.triangle[0], new_pos);
+            let new_bary = self.barycentric_coords(new_pos, new_triangle);
+            let new_height = self.height_at(new_triangle, new_bary);
+
+            let height_diff = new_height - drop.height;
+
+            let mut new_sediment = drop.sediment;
+
+            if height_diff > 0.0 {
+                let to_deposit = drop.sediment.min(height_diff);
+                self.deposit(drop.triangle, drop.bary, to_deposit);
+                new_sediment -= to_deposit;
+            } else {
+                let capacity = (-height_diff).max(self.settings.min_slope) * drop.vel * drop.water * self.settings.capacity;
+                if drop.sediment > capacity {
+                    new_sediment *= 1.0 - self.settings.deposition;
+                    let to_deposit = drop.sediment * self.settings.deposition;
+                    self.deposit(drop.triangle, drop.bary, to_deposit);
+                } else {
+                    let hardness = self.hardness_at(drop.triangle, drop.bary);
+                    let to_erode = (capacity - drop.sediment) * hardness;
+                    let to_erode = to_erode.min(-height_diff);
+                    self.deposit(drop.triangle, drop.bary, -to_erode);
+                    new_sediment += to_erode;
+                }
+            }
+
+            let new_vel = (drop.vel * drop.vel + height_diff * self.settings.gravity).abs().sqrt();
+            let new_water = drop.water * (1.0 - self.settings.evaporation);
+
+            drop = Drop {
+                pos: new_pos,
+                dir: new_dir,
+                vel: new_vel,
+                water: new_water,
+                sediment: new_sediment,
+                height: new_height,
+                triangle: new_triangle,
+                bary: new_bary,
+            };
+        }
     }
 
-    fn simulate_water_step(&mut self, drop: &mut Drop, alloc: &mut Vec<(usize, f32)>, points: &mut Vec<Vec3>) -> bool {
-        let gradient = self.gradient_at(drop.triangle, drop.bary);
+    fn simulate_noneroding_step(&mut self, pos: &mut Vec3, dir: &mut Vec3, old_pos: &mut usize) {
+        let triangle = self.find_triangle(*old_pos, *pos);
+        let bary = self.barycentric_coords(*pos, triangle);
+        self.add_wetness(triangle, bary);
+        let gradient = self.gradient_at(triangle, bary);
 
-        let new_dir = drop.dir * self.settings.inertia - gradient * (1.0 - self.settings.inertia);
+        let new_dir = *dir * self.settings.inertia - gradient * (1.0 - self.settings.inertia);
+        let new_pos = (*pos + new_dir.normalize_or_zero() * self.min_dist).normalize();
 
-        let new_pos = (drop.pos + new_dir.normalize_or_zero() * self.min_dist).normalize();
-        let new_triangle = self.find_triangle(drop.triangle[0], new_pos);
-        let new_bary = self.barycentric_coords(new_pos, new_triangle);
-        let new_height = self.height_at(new_triangle, new_bary);
-
-        // println!("gradient: {gradient:?}, pos: {new_pos:?}, dir: {new_dir:?}, tri: {new_triangle:?}, bary: {new_bary:?}, height: {new_height:?}");
-
-        // println!("dir: {:?}, pos: {:?}, triangle: {:?}, bary: {:?}, height: {:?}", new_dir, new_pos, new_triangle, new_bary, new_height);
-
-        let height_diff = new_height - drop.height;
-
-        let mut new_sediment = drop.sediment;
-
-        // println!("height diff: {:?}", height_diff);
-        if height_diff > 0.0  {
-            let to_deposit = drop.sediment.min(height_diff);
-            self.deposit(drop.triangle, drop.bary, to_deposit);
-            new_sediment -= to_deposit;
-        } else {
-            let capacity = (-height_diff).max(self.settings.min_slope) * drop.vel * drop.water * self.settings.capacity;
-            if drop.sediment > capacity {
-                new_sediment *= 1.0 - self.settings.deposition;
-                let to_deposit = drop.sediment * self.settings.deposition;
-                self.deposit(drop.triangle, drop.bary, to_deposit);
-            } else {
-                let hardness = self.hardness_at(drop.triangle, drop.bary);
-                let to_erode = (capacity - drop.sediment) * hardness;
-                // println!("erosion: {}, to_erode: {}, height_diff: {}", self.settings.erosion, to_erode, height_diff);
-                let to_erode = to_erode.min(-height_diff);
-                self.erode(drop.pos, drop.triangle[0],to_erode, alloc);
-                new_sediment += to_erode;
-            }
-        }
-
-        let new_vel = (drop.vel * drop.vel + height_diff * self.settings.gravity).abs().sqrt();
-        let new_water = drop.water * (1.0 - self.settings.evaporation);
-        let new_lifetime = drop.lifetime + 1;
-
-        *drop = Drop {
-            pos: new_pos,
-            dir: new_dir,
-            vel: new_vel,
-            water: new_water,
-            sediment: new_sediment,
-            height: new_height,
-            triangle: new_triangle,
-            bary: new_bary,
-            lifetime: new_lifetime,
-        };
-
-        drop.lifetime < self.settings.max_steps
+        *dir = new_dir;
+        *pos = new_pos;
+        *old_pos = triangle[0];
     }
 
     fn deposit(&mut self, triangle: [usize; 3], bary: [f32; 3], amount: f32) {
-        // println!("Depositing {:?} amount", amount);
         for i in 0..3 {
             self.heights[triangle[i]] += bary[i] * amount;
         }
-    }
-
-    fn erode(&mut self, at: Vec3, start: usize, amount: f32, alloc: &mut Vec<(usize, f32)>) {
-        // println!("eroding {}", amount);
-        let threshold = self.settings.radius * self.min_dist;
-        let mut acc = threshold - self.positions[start].dot(at).recip();
-        alloc.push((start, acc));
-
-        let mut begin_recurse = 0;
-        let mut end_recurse = alloc.len();
-
-        while begin_recurse != end_recurse {
-            for i in begin_recurse..end_recurse {
-                'outer: for neighbour in self.adjacent[alloc[i].0] {
-                    for &(found, _) in alloc.iter().rev() {
-                        if neighbour == found {
-                            continue 'outer;
-                        }
-                    }
-                    let scale = self.positions[neighbour].dot(at).recip();
-                    let dist = (scale * scale - 1.0).sqrt();
-                    let factor = threshold - dist;
-                    // let actual_dist = at.distance(self.positions[neighbour] * scale);
-                    // println!("factor {} dist {} scale {} actual {} diff_dist: {}", factor, dist, scale, actual_dist, dist - actual_dist);
-                    if factor > 0.0 {
-                        alloc.push((neighbour, factor));
-                        acc += factor;
-                    }
-                }
-            }
-            begin_recurse = end_recurse;
-            end_recurse = alloc.len();
-        }
-
-        let norm_factor = acc.recip() * amount;
-        // println!("alloc: {:?}", alloc.len());
-        alloc
-            .drain(..)
-            .for_each(|(idx, factor)| {
-                self.heights[idx] -= factor * norm_factor;
-            });
     }
 
     pub fn find_triangle(&self, mut guess: usize, point: Vec3) -> [usize; 3] {
@@ -250,7 +223,42 @@ impl World {
 
         let mut adjacent = self.adjacent[guess];
 
-        let mut around_dots = Vec::with_capacity(6);
+        let mut max_idx = 0;
+        let mut max_val = f32::NEG_INFINITY;
+
+        for i in adjacent {
+            let factor = self.positions[i].dot(point);
+            if factor > max_val {
+                max_idx = i;
+                max_val = factor;
+            }
+        }
+
+        while max_val > guess_dot {
+            guess = max_idx;
+            guess_dot = max_val;
+            adjacent = self.adjacent[guess];
+
+            match adjacent.len() {
+                5 => for i in adjacent {
+                    let factor = self.positions[i].dot(point);
+                    if factor > max_val {
+                        max_idx = i;
+                        max_val = factor;
+                    }
+                },
+                6 => for i in adjacent {
+                    let factor = self.positions[i].dot(point);
+                    if factor > max_val {
+                        max_idx = i;
+                        max_val = factor;
+                    }
+                },
+                _ => unreachable!(),
+            }
+        }
+
+        let mut around_dots = ArrayVec::<[f32; 6]>::new();
         around_dots.extend(
             adjacent
                 .iter()
@@ -258,28 +266,12 @@ impl World {
                 .map(|x| self.positions[x].dot(point))
         );
 
-        let (mut max_idx, mut max_val) = calculate_max(&around_dots);
-
-        while max_val > guess_dot {
-            // println!("guess dot: {:?}, idx: {}", guess_dot, guess);
-            guess = adjacent[max_idx];
-            guess_dot = max_val;
-
-            adjacent = self.adjacent[guess];
-
-            around_dots.clear();
-            around_dots.extend(
-                adjacent
-                    .iter()
-                    .copied()
-                    .map(|x| self.positions[x].dot(point))
-            );
-            (max_idx, max_val) = calculate_max(&around_dots);
+        let mut max_idx = 0;
+        for (idx, val) in around_dots.into_iter().enumerate().skip(1) {
+            if val > around_dots[max_idx] {
+                max_idx = idx;
+            }
         }
-
-        // }
-
-        // println!("Values: {:?}, guess_dot: {}, max_val: {}, idx: {}\nIndices {:?}", around_dots, guess_dot, max_val, self.adjacent[guess][max_idx], self.adjacent[guess]);
 
         let next_idx = (max_idx + 1) % around_dots.len();
         let prev_idx = (max_idx + around_dots.len() - 1) % around_dots.len();
@@ -297,43 +289,45 @@ impl World {
 
     pub fn normalized_gradient(&self, at: usize) -> Vec3 {
         let me = self.positions[at];
-        let around = self.adjacent[at];
-        let around_points = around.into_iter().map(|x| self.positions[x]);
-        let projected_points = around_points.map(|x| x * x.dot(me).recip());
-        let normalized_points = projected_points.map(|x| x - me);
-        let heights = around.into_iter().map(|x| self.heights[x]);
         let height_me = self.heights[at];
-        let delta_heights = heights.map(|x| x - height_me);
-        std::iter::zip(
-            normalized_points,
-            delta_heights,
-        )
-            .map(|(x, y)| x * y)
-            .sum::<Vec3>()
-            .normalize()
+        let around = self.adjacent[at];
+        let mut sum = Vec3::ZERO;
+        for i in around {
+            let point = self.positions[i];
+            let projected = point * point.dot(me).recip();
+            let normalized = projected - me;
+            let height = self.heights[i];
+            let delta = height - height_me;
+            sum += normalized * delta;
+        }
+        sum.normalize()
+    }
+
+    pub fn add_wetness(&mut self, triangle: [usize; 3], bary: [f32; 3]) {
+        triangle
+            .into_iter()
+            .zip(bary.into_iter())
+            .for_each(|(idx, val)| self.wetness[idx] += val);
     }
 
     pub fn gradient_at(&self, triangle: [usize; 3], bary: [f32; 3]) -> Vec3 {
-        let sum = triangle.into_iter()
-            .zip(bary)
-            .map(|(x, y)| self.normalized_gradient(x) * y)
-            .sum::<Vec3>();
+        let sum = bary[0] * self.normalized_gradient(triangle[0]) +
+            bary[1] * self.normalized_gradient(triangle[1]) +
+            bary[2] * self.normalized_gradient(triangle[2]);
 
         sum.normalize_or_zero()
     }
 
     pub fn height_at(&self, triangle: [usize; 3], bary: [f32; 3]) -> f32 {
-        triangle.iter()
-            .zip(bary)
-            .map(|(x, y)| self.heights[*x] * y)
-            .sum()
+        bary[0] * self.heights[triangle[0]] +
+            bary[1] * self.heights[triangle[1]] +
+            bary[2] * self.heights[triangle[2]]
     }
 
     pub fn hardness_at(&self, triangle: [usize; 3], bary: [f32; 3]) -> f32 {
-        triangle.iter()
-            .zip(bary)
-            .map(|(x, y)| self.hardness[*x] * y)
-            .sum()
+        bary[0] * self.hardness[triangle[0]] +
+            bary[1] * self.hardness[triangle[1]] +
+            bary[2] * self.hardness[triangle[2]]
     }
 }
 
@@ -381,24 +375,6 @@ fn calculate_max(items: &[f32]) -> (usize, f32) {
         .unwrap()
 }
 
-// #[inline]
-// fn calculate_max(items: &[f32]) -> (usize, f32) {
-//     let mut max_val = items[0];
-//     let mut max_idx = 0;
-//
-//     items[1..]
-//         .iter()
-//         .enumerate()
-//         .for_each(|(idx, &val)| {
-//             if max_val < val {
-//                 max_idx = idx;
-//                 max_val = val;
-//             }
-//         });
-//
-//     (max_idx, max_val)
-// }
-
 fn calculate_barycentric_sphere(v: Vec3, p: [Vec3; 3]) -> [f32; 3] {
     // planar coordinates
     let [a, b, c] = p.map(|x| x * x.dot(v).recip());
@@ -415,8 +391,5 @@ fn calculate_barycentric_sphere(v: Vec3, p: [Vec3; 3]) -> [f32; 3] {
 
     let lengths = [a, b, c].map(Vec3::length);
     let total = lengths[0] + lengths[1] + lengths[2];
-    // println!("area_triangle: {}, divided_area: {}", area_triangle, divided_area);
-    // println!("lengths: {:?}", lengths);
-    // println!("total: {lengths:?}");
     lengths.map(|x| x / total)
 }

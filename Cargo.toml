@@ -12,3 +12,8 @@ rand = "0.8.5"
 clatter = { git = "https://github.com/Ralith/clatter", features = ["rand"] }
 tinyvec = "1.6.0"
 serde = { version = "1", features = ["derive"] }
+kiddo = "2.0.2"
+
+[profile.release]
+debug = true
+split-debuginfo = "unpacked"

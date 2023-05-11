@@ -65,14 +65,11 @@ pub struct World {
     pub heights: Vec<f32>,
     pub hardness: Vec<f32>,
     pub wetness: Vec<f32>,
-    pub slope: Vec<f32>,
     pub adjacent: Vec<ArrayVec<[usize; 6]>>,
     pub positions: Vec<Vec3>,
     pub subdivisions: usize,
     pub min_dist: f32,
     pub settings: DropSettings,
-
-    pub debug_drop: Vec3,
 }
 
 impl World {
@@ -85,7 +82,6 @@ impl World {
         let heights = Vec::new();
         let hardness = Vec::new();
         let wetness = vec![0.0; points.len()];
-        let slope = vec![0.0; points.len()];
         let positions = points.iter().copied().map(Vec3::from).collect::<Vec<_>>();
         let min_dist = calculate_min_dist(&adjacent, &positions);
         println!("Max distance: {}", calculate_max_dist(&adjacent, &positions));
@@ -95,14 +91,11 @@ impl World {
             heights,
             hardness,
             wetness,
-            slope,
             adjacent,
             positions,
             subdivisions,
             min_dist,
             settings,
-
-            debug_drop: Vec3::ZERO,
         }
     }
 
@@ -130,7 +123,6 @@ impl World {
     }
 
     pub fn simulate_water_drop(&mut self, start: Vec3) {
-        // let start = self.debug_drop.normalize();
         let start = start.normalize();
         assert!(start.is_normalized());
 
@@ -363,15 +355,6 @@ fn calculate_max_dist(adjacent: &[ArrayVec<[usize; 6]>], points: &[Vec3]) -> f32
                 .unwrap()
         })
         .max_by(|x, y| x.total_cmp(y))
-        .unwrap()
-}
-
-fn calculate_max(items: &[f32]) -> (usize, f32) {
-    items
-        .iter()
-        .copied()
-        .enumerate()
-        .max_by(|(_, x), (_, y)| x.total_cmp(y))
         .unwrap()
 }
 

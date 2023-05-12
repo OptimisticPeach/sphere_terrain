@@ -9,7 +9,6 @@ fn main() {
         deposition: 0.85,
         erosion: 0.78,
         evaporation: 0.27,
-        radius: 10.0,
         min_slope: 0.01,
         gravity: 10.0,
         max_steps: 32,
@@ -37,7 +36,7 @@ fn main() {
         offset: Default::default(),
     });
 
-    world.simulate_node_centered_drops(120000);
+    world.simulate_node_centered_drops(1200000, 0);
 
     black_box((&world.heights, &world.positions, &world.adjacent, &world.wetness));
 }

@@ -24,8 +24,6 @@ pub struct DropSettings {
     pub erosion: f32,
     // [0, 0.5]
     pub evaporation: f32,
-    // [0, 10]
-    pub radius: f32,
     // [0, 0.06]
     pub min_slope: f32,
     // 10?
@@ -37,15 +35,14 @@ pub struct DropSettings {
 impl Default for DropSettings {
     fn default() -> Self {
         Self {
-            inertia: 0.3,
-            capacity: 8.0,
-            deposition: 0.2,
-            erosion: 0.7,
-            evaporation: 0.02,
-            radius: 4.0,
+            inertia: 0.8,
+            capacity: 1.0,
+            deposition: 0.23,
+            erosion: 0.53,
+            evaporation: 0.27,
             min_slope: 0.01,
-            gravity: 10.0,
-            max_steps: 64,
+            gravity: 9.81,
+            max_steps: 32,
         }
     }
 }
@@ -161,8 +158,8 @@ impl World {
             });
     }
 
-    pub fn simulate_node_centered_drops(&self, n: usize) {
-        (0..n)
+    pub fn simulate_node_centered_drops(&self, n: usize, offset: usize) {
+        (offset..(n + offset))
             .into_par_iter()
             .for_each(|i: usize| {
                 self.simulate_water_drop(self.positions[i % self.positions.len()]);

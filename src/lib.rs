@@ -1,9 +1,10 @@
 #![feature(portable_simd)]
 
-// use std::collections::HashSet;
-// use fxhash::FxBuildHasher;
+use std::sync::atomic::Ordering;
+use atomic_float::AtomicF32;
 use glam::Vec3;
 use hexasphere::shapes::IcoSphere;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use tinyvec::ArrayVec;
 use crate::noisegen::Opts;
@@ -62,10 +63,10 @@ struct Drop {
 }
 
 pub struct World {
-    pub heights: Vec<f32>,
-    pub hardness: Vec<f32>,
-    pub wetness: Vec<f32>,
-    pub rivers: Vec<f32>,
+    pub heights: Vec<AF32>,
+    pub hardness: Vec<AF32>,
+    pub wetness: Vec<AF32>,
+    pub rivers: Vec<AF32>,
     pub adjacent: Vec<ArrayVec<[usize; 6]>>,
     pub positions: Vec<Vec3>,
     pub subdivisions: usize,
@@ -82,8 +83,8 @@ impl World {
 
         let heights = Vec::new();
         let hardness = Vec::new();
-        let wetness = vec![0.0; points.len()];
-        let rivers = vec![0.0; points.len()];
+        let wetness = (0..points.len()).map(|_| AF32::new(0.0)).collect();
+        let rivers = (0..points.len()).map(|_| AF32::new(0.0)).collect();
         let positions = points.iter().copied().map(Vec3::from).collect::<Vec<_>>();
         let min_dist = calculate_min_dist(&adjacent, &positions);
         println!("Max distance: {}", calculate_max_dist(&adjacent, &positions));
@@ -103,55 +104,72 @@ impl World {
     }
 
     pub fn fill_noise_heights(&mut self, opts: Opts) {
-        self.heights = noisegen::sample_all_noise(&self.positions, opts);
+        self.heights = noisegen::sample_all_noise(&self.positions, opts)
+            .into_iter()
+            .map(|x| AF32::new(x))
+            .collect();
     }
 
     pub fn fill_hardness(&mut self, opts: Opts) {
-        self.hardness = noisegen::sample_all_noise(&self.positions, opts);
+        self.hardness = noisegen::sample_all_noise(&self.positions, opts)
+            .into_iter()
+            .map(|x| AF32::new(x))
+            .collect();
     }
 
     pub fn fill_wetness(&mut self) {
         self.wetness
             .iter_mut()
-            .for_each(|x| *x = 0.0);
+            .for_each(|x| *x = AF32::new(0.0));
         self.rivers
             .iter_mut()
-            .for_each(|x| *x = 0.0);
+            .for_each(|x| *x = AF32::new(0.0));
 
-        let mut river_pos = Vec::with_capacity(self.settings.max_steps);
 
-        let mut old_pos = 0;
-        for i in 0..self.positions.len() {
-            let mut is_river = false;
-            let mut pos = self.positions[i];
-            let mut dir = Vec3::ZERO;
-            let mut water = 1.0;
-            for _ in 0..self.settings.max_steps {
-                let triangle = self.find_triangle(old_pos, pos);
-                let bary = self.barycentric_coords(pos, triangle);
-                is_river |= self.heights[triangle[0]] < 1.0;
-                river_pos.push((triangle, bary));
-                self.add_wetness(triangle, bary, water);
-                let gradient = self.gradient_at(triangle, bary);
+        (0..self.positions.len())
+            .into_par_iter()
+            .for_each(|i: usize| {
+                let mut old_pos = 0;
+                let mut river_pos = Vec::with_capacity(self.settings.max_steps);
 
-                let new_dir = dir * self.settings.inertia - gradient * (1.0 - self.settings.inertia);
-                let new_pos = (pos + new_dir.normalize_or_zero() * self.min_dist).normalize();
+                let mut is_river = false;
+                let mut pos = self.positions[i];
+                let mut dir = Vec3::ZERO;
+                let mut water = 1.0;
+                for _ in 0..self.settings.max_steps {
+                    let triangle = self.find_triangle(old_pos, pos);
+                    let bary = self.barycentric_coords(pos, triangle);
+                    is_river |= self.heights[triangle[0]].load() < 1.0;
+                    river_pos.push((triangle, bary));
+                    self.add_wetness(triangle, bary, water);
+                    let gradient = self.gradient_at(triangle, bary);
 
-                dir = new_dir;
-                pos = new_pos;
-                old_pos = triangle[0];
-                water *= 1.0 - self.settings.evaporation;
-            }
-            if is_river {
-                for (triangle, bary) in river_pos.iter().copied() {
-                    self.add_river(triangle, bary);
+                    let new_dir = dir * self.settings.inertia - gradient * (1.0 - self.settings.inertia);
+                    let new_pos = (pos + new_dir.normalize_or_zero() * self.min_dist).normalize();
+
+                    dir = new_dir;
+                    pos = new_pos;
+                    old_pos = triangle[0];
+                    water *= 1.0 - self.settings.evaporation;
                 }
-            }
-            river_pos.clear();
-        }
+                if is_river {
+                    for (triangle, bary) in river_pos.iter().copied() {
+                        self.add_river(triangle, bary);
+                    }
+                }
+                river_pos.clear();
+            });
     }
 
-    pub fn simulate_water_drop(&mut self, start: Vec3) {
+    pub fn simulate_node_centered_drops(&self, n: usize) {
+        (0..n)
+            .into_par_iter()
+            .for_each(|i: usize| {
+                self.simulate_water_drop(self.positions[i % self.positions.len()]);
+            });
+    }
+
+    pub fn simulate_water_drop(&self, start: Vec3) {
         let start = start.normalize();
         assert!(start.is_normalized());
 
@@ -290,35 +308,35 @@ impl World {
 
     pub fn normalized_gradient(&self, at: usize) -> Vec3 {
         let me = self.positions[at];
-        let height_me = self.heights[at];
+        let height_me = self.heights[at].load();
         let around = self.adjacent[at];
         let mut sum = Vec3::ZERO;
         for i in around {
             let point = self.positions[i];
             let projected = point * point.dot(me).recip();
             let normalized = projected - me;
-            let height = self.heights[i];
+            let height = self.heights[i].load();
             let delta = height - height_me;
             sum += normalized * delta;
         }
         sum.normalize()
     }
 
-    pub fn deposit(&mut self, triangle: [usize; 3], bary: [f32; 3], amount: f32) {
+    pub fn deposit(&self, triangle: [usize; 3], bary: [f32; 3], amount: f32) {
         for i in 0..3 {
-            self.heights[triangle[i]] += bary[i] * amount;
+            self.heights[triangle[i]].fetch_add(bary[i] * amount);
         }
     }
 
-    pub fn add_river(&mut self, triangle: [usize; 3], bary: [f32; 3]) {
+    pub fn add_river(&self, triangle: [usize; 3], bary: [f32; 3]) {
         for i in 0..3 {
-            self.rivers[triangle[i]] += bary[i];
+            self.rivers[triangle[i]].fetch_add(bary[i]);
         }
     }
 
-    pub fn add_wetness(&mut self, triangle: [usize; 3], bary: [f32; 3], amount: f32) {
+    pub fn add_wetness(&self, triangle: [usize; 3], bary: [f32; 3], amount: f32) {
         for i in 0..3 {
-            self.wetness[triangle[i]] += bary[i] * amount;
+            self.wetness[triangle[i]].fetch_add(bary[i] * amount);
         }
     }
 
@@ -331,15 +349,15 @@ impl World {
     }
 
     pub fn height_at(&self, triangle: [usize; 3], bary: [f32; 3]) -> f32 {
-        bary[0] * self.heights[triangle[0]] +
-            bary[1] * self.heights[triangle[1]] +
-            bary[2] * self.heights[triangle[2]]
+        bary[0] * self.heights[triangle[0]].load() +
+            bary[1] * self.heights[triangle[1]].load() +
+            bary[2] * self.heights[triangle[2]].load()
     }
 
     pub fn hardness_at(&self, triangle: [usize; 3], bary: [f32; 3]) -> f32 {
-        bary[0] * self.hardness[triangle[0]] +
-            bary[1] * self.hardness[triangle[1]] +
-            bary[2] * self.hardness[triangle[2]]
+        bary[0] * self.hardness[triangle[0]].load() +
+            bary[1] * self.hardness[triangle[1]].load() +
+            bary[2] * self.hardness[triangle[2]].load()
     }
 }
 
@@ -399,3 +417,102 @@ fn calculate_barycentric_sphere(v: Vec3, p: [Vec3; 3]) -> [f32; 3] {
     let total = lengths[0] + lengths[1] + lengths[2];
     lengths.map(|x| x / total)
 }
+
+pub struct AF32(pub AtomicF32);
+
+impl AF32 {
+    #[inline]
+    pub const fn new(float: f32) -> Self {
+        Self(AtomicF32::new(float))
+    }
+
+    #[inline]
+    pub fn get_mut(&mut self) -> &mut f32 {
+        self.0.get_mut()
+    }
+
+    #[inline]
+    pub fn into_inner(self) -> f32 {
+        self.0.into_inner()
+    }
+
+    #[inline]
+    pub fn load(&self) -> f32 {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn store(&self, value: f32) {
+        self.0.store(value, Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn swap(&self, new_value: f32) -> f32 {
+        self.0.swap(new_value, Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn compare_and_swap(&self, current: f32, new: f32) -> f32 {
+        self.0.compare_and_swap(current, new, Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn compare_exchange(
+        &self,
+        current: f32,
+        new: f32,
+    ) -> Result<f32, f32> {
+        self.0.compare_exchange(current, new, Ordering::Relaxed, Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn compare_exchange_weak(
+        &self,
+        current: f32,
+        new: f32,
+    ) -> Result<f32, f32> {
+        self.0.compare_exchange_weak(current, new, Ordering::Relaxed, Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn fetch_update<F>(
+        &self,
+        update: F,
+    ) -> Result<f32, f32>
+        where
+            F: FnMut(f32) -> Option<f32>,
+    {
+        self.0.fetch_update(Ordering::Relaxed, Ordering::Relaxed, update)
+    }
+
+    #[inline]
+    pub fn fetch_add(&self, val: f32) -> f32 {
+        self.0.fetch_add(val, Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn fetch_sub(&self, val: f32) -> f32 {
+        self.0.fetch_sub(val, Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn fetch_abs(&self) -> f32 {
+        self.0.fetch_abs(Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn fetch_neg(&self) -> f32 {
+        self.0.fetch_neg(Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn fetch_min(&self, value: f32) -> f32 {
+        self.0.fetch_min(value, Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn fetch_max(&self, value: f32) -> f32 {
+        self.0.fetch_max(value, Ordering::Relaxed)
+    }
+}
+

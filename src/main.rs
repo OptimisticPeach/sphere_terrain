@@ -37,11 +37,7 @@ fn main() {
         offset: Default::default(),
     });
 
-    for i in 0..120000 {
-        let idx = i % world.heights.len();
-        let pt = world.positions[idx];
-        world.simulate_water_drop(pt);
-    }
+    world.simulate_node_centered_drops(120000);
 
     black_box((&world.heights, &world.positions, &world.adjacent, &world.wetness));
 }

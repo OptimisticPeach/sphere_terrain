@@ -13,6 +13,8 @@ clatter = { git = "https://github.com/Ralith/clatter", features = ["rand"] }
 tinyvec = "1.6.0"
 serde = { version = "1", features = ["derive"] }
 kiddo = "2.0.2"
+atomic_float = "0.1.0"
+rayon = "1.7.0"
 
 [features]
 ij = []

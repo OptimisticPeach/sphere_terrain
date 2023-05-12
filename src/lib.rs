@@ -65,6 +65,7 @@ pub struct World {
     pub heights: Vec<f32>,
     pub hardness: Vec<f32>,
     pub wetness: Vec<f32>,
+    pub rivers: Vec<f32>,
     pub adjacent: Vec<ArrayVec<[usize; 6]>>,
     pub positions: Vec<Vec3>,
     pub subdivisions: usize,
@@ -82,6 +83,7 @@ impl World {
         let heights = Vec::new();
         let hardness = Vec::new();
         let wetness = vec![0.0; points.len()];
+        let rivers = vec![0.0; points.len()];
         let positions = points.iter().copied().map(Vec3::from).collect::<Vec<_>>();
         let min_dist = calculate_min_dist(&adjacent, &positions);
         println!("Max distance: {}", calculate_max_dist(&adjacent, &positions));
@@ -91,6 +93,7 @@ impl World {
             heights,
             hardness,
             wetness,
+            rivers,
             adjacent,
             positions,
             subdivisions,
@@ -111,14 +114,40 @@ impl World {
         self.wetness
             .iter_mut()
             .for_each(|x| *x = 0.0);
+        self.rivers
+            .iter_mut()
+            .for_each(|x| *x = 0.0);
+
+        let mut river_pos = Vec::with_capacity(self.settings.max_steps);
 
         let mut old_pos = 0;
         for i in 0..self.positions.len() {
+            let mut is_river = false;
             let mut pos = self.positions[i];
             let mut dir = Vec3::ZERO;
+            let mut water = 1.0;
             for _ in 0..self.settings.max_steps {
-                self.simulate_noneroding_step(&mut pos, &mut dir, &mut old_pos);
+                let triangle = self.find_triangle(old_pos, pos);
+                let bary = self.barycentric_coords(pos, triangle);
+                is_river |= self.heights[triangle[0]] < 1.0;
+                river_pos.push((triangle, bary));
+                self.add_wetness(triangle, bary, water);
+                let gradient = self.gradient_at(triangle, bary);
+
+                let new_dir = dir * self.settings.inertia - gradient * (1.0 - self.settings.inertia);
+                let new_pos = (pos + new_dir.normalize_or_zero() * self.min_dist).normalize();
+
+                dir = new_dir;
+                pos = new_pos;
+                old_pos = triangle[0];
+                water *= 1.0 - self.settings.evaporation;
             }
+            if is_river {
+                for (triangle, bary) in river_pos.iter().copied() {
+                    self.add_river(triangle, bary);
+                }
+            }
+            river_pos.clear();
         }
     }
 
@@ -187,26 +216,6 @@ impl World {
                 triangle: new_triangle,
                 bary: new_bary,
             };
-        }
-    }
-
-    fn simulate_noneroding_step(&mut self, pos: &mut Vec3, dir: &mut Vec3, old_pos: &mut usize) {
-        let triangle = self.find_triangle(*old_pos, *pos);
-        let bary = self.barycentric_coords(*pos, triangle);
-        self.add_wetness(triangle, bary);
-        let gradient = self.gradient_at(triangle, bary);
-
-        let new_dir = *dir * self.settings.inertia - gradient * (1.0 - self.settings.inertia);
-        let new_pos = (*pos + new_dir.normalize_or_zero() * self.min_dist).normalize();
-
-        *dir = new_dir;
-        *pos = new_pos;
-        *old_pos = triangle[0];
-    }
-
-    fn deposit(&mut self, triangle: [usize; 3], bary: [f32; 3], amount: f32) {
-        for i in 0..3 {
-            self.heights[triangle[i]] += bary[i] * amount;
         }
     }
 
@@ -295,11 +304,22 @@ impl World {
         sum.normalize()
     }
 
-    pub fn add_wetness(&mut self, triangle: [usize; 3], bary: [f32; 3]) {
-        triangle
-            .into_iter()
-            .zip(bary.into_iter())
-            .for_each(|(idx, val)| self.wetness[idx] += val);
+    pub fn deposit(&mut self, triangle: [usize; 3], bary: [f32; 3], amount: f32) {
+        for i in 0..3 {
+            self.heights[triangle[i]] += bary[i] * amount;
+        }
+    }
+
+    pub fn add_river(&mut self, triangle: [usize; 3], bary: [f32; 3]) {
+        for i in 0..3 {
+            self.rivers[triangle[i]] += bary[i];
+        }
+    }
+
+    pub fn add_wetness(&mut self, triangle: [usize; 3], bary: [f32; 3], amount: f32) {
+        for i in 0..3 {
+            self.wetness[triangle[i]] += bary[i] * amount;
+        }
     }
 
     pub fn gradient_at(&self, triangle: [usize; 3], bary: [f32; 3]) -> Vec3 {

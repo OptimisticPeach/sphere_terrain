@@ -37,7 +37,7 @@ fn main() {
         offset: Default::default(),
     });
 
-    for i in 0..720000 {
+    for i in 0..120000 {
         let idx = i % world.heights.len();
         let pt = world.positions[idx];
         world.simulate_water_drop(pt);

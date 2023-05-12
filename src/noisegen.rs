@@ -3,6 +3,7 @@ use std::simd::{LaneCount, Simd, SimdFloat, SupportedLaneCount};
 use clatter::{Sample, Simplex3d};
 use glam::Vec3;
 use rand::SeedableRng;
+use rayon::prelude::*;
 
 /// Compute a patch of fractal brownian motion noise
 #[derive(Copy, Clone, Debug)]
@@ -60,6 +61,8 @@ fn generate_inner<const LANES: usize>(opts: Opts, samples: &[Vec3], pixels: &mut
     where
         LaneCount<LANES>: SupportedLaneCount,
 {
+    let rest_len = samples.len() % LANES;
+    pixels.extend(std::iter::repeat(0.0).take(samples.len() - rest_len));
     let user_seed = opts.seed.to_be_bytes();
     let mut seed = [0u8; 32];
 
@@ -74,35 +77,39 @@ fn generate_inner<const LANES: usize>(opts: Opts, samples: &[Vec3], pixels: &mut
     let offset_z = Simd::splat(opts.offset.z);
 
     let sample_scale = Simd::splat(opts.sample_scale);
-    for chunk in samples.chunks_exact(LANES) {
-        let mut px = Simd::splat(0.0f32);
-        let mut py = Simd::splat(0.0f32);
-        let mut pz = Simd::splat(0.0f32);
-        for i in 0..LANES {
-            px[i] = chunk[i].x;
-            py[i] = chunk[i].y;
-            pz[i] = chunk[i].z;
-        }
-        px *= sample_scale;
-        py *= sample_scale;
-        pz *= sample_scale;
+    samples
+        .par_chunks_exact(LANES)
+        .zip(
+            pixels.par_chunks_exact_mut(LANES)
+        )
+        .for_each(|(chunk, result)| {
+            let mut px = Simd::splat(0.0f32);
+            let mut py = Simd::splat(0.0f32);
+            let mut pz = Simd::splat(0.0f32);
+            for i in 0..LANES {
+                px[i] = chunk[i].x;
+                py[i] = chunk[i].y;
+                pz[i] = chunk[i].z;
+            }
+            px *= sample_scale;
+            py *= sample_scale;
+            pz *= sample_scale;
 
-        px += offset_x;
-        py += offset_y;
-        pz += offset_z;
+            px += offset_x;
+            py += offset_y;
+            pz += offset_z;
 
-        let sample = fbm::<LANES>(
-            opts.octaves,
-            (-opts.hurst_exponent).exp2(),
-            opts.lacunarity,
-            [px, py, pz],
-            &noise,
-        );
-        let value = sample.value;
-        pixels.extend_from_slice(&value.as_array()[..]);
-    }
+            let sample = fbm::<LANES>(
+                opts.octaves,
+                (-opts.hurst_exponent).exp2(),
+                opts.lacunarity,
+                [px, py, pz],
+                &noise,
+            );
+            let value = sample.value;
+            result.copy_from_slice(&*value.as_array());
+        });
 
-    let rest_len = samples.len() % LANES;
     let rest = &samples[samples.len() - rest_len..];
     let mut px = Simd::splat(0.0f32);
     let mut py = Simd::splat(0.0f32);
@@ -130,13 +137,18 @@ fn generate_inner<const LANES: usize>(opts: Opts, samples: &[Vec3], pixels: &mut
     let value = sample.value;
     pixels.extend_from_slice(&value.as_array()[..rest_len]);
 
-    let mut max = Simd::splat(f32::NEG_INFINITY);
-    let mut min = Simd::splat(f32::INFINITY);
-    for set in pixels.chunks_exact(LANES) {
-        let loaded = Simd::from_slice(set);
-        max = loaded.simd_max(max);
-        min = loaded.simd_min(min);
-    }
+    let max = Simd::splat(f32::NEG_INFINITY);
+    let min = Simd::splat(f32::INFINITY);
+    let (max, min) = pixels
+        .par_chunks_exact(LANES)
+        .map(|x| Simd::from_slice(x))
+        .fold(|| (max, min), |(max, min), y| {
+            (max.simd_max(y), min.simd_min(y))
+        })
+        .reduce_with(|(max, min), (omax, omin)| {
+            (max.simd_max(omax), min.simd_min(omin))
+        })
+        .unwrap();
 
     let mut max = max.reduce_max();
     let mut min = min.reduce_min();

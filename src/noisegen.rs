@@ -58,8 +58,8 @@ unsafe fn generate_sse(opts: Opts, samples: &[Vec3], pixels: &mut Vec<f32>) {
 
 #[inline(always)]
 fn generate_inner<const LANES: usize>(opts: Opts, samples: &[Vec3], pixels: &mut Vec<f32>)
-    where
-        LaneCount<LANES>: SupportedLaneCount,
+where
+    LaneCount<LANES>: SupportedLaneCount,
 {
     let rest_len = samples.len() % LANES;
     pixels.extend(std::iter::repeat(0.0).take(samples.len() - rest_len));
@@ -79,9 +79,7 @@ fn generate_inner<const LANES: usize>(opts: Opts, samples: &[Vec3], pixels: &mut
     let sample_scale = Simd::splat(opts.sample_scale);
     samples
         .par_chunks_exact(LANES)
-        .zip(
-            pixels.par_chunks_exact_mut(LANES)
-        )
+        .zip(pixels.par_chunks_exact_mut(LANES))
         .for_each(|(chunk, result)| {
             let mut px = Simd::splat(0.0f32);
             let mut py = Simd::splat(0.0f32);
@@ -142,23 +140,20 @@ fn generate_inner<const LANES: usize>(opts: Opts, samples: &[Vec3], pixels: &mut
     let (max, min) = pixels
         .par_chunks_exact(LANES)
         .map(|x| Simd::from_slice(x))
-        .fold(|| (max, min), |(max, min), y| {
-            (max.simd_max(y), min.simd_min(y))
-        })
-        .reduce_with(|(max, min), (omax, omin)| {
-            (max.simd_max(omax), min.simd_min(omin))
-        })
+        .fold(
+            || (max, min),
+            |(max, min), y| (max.simd_max(y), min.simd_min(y)),
+        )
+        .reduce_with(|(max, min), (omax, omin)| (max.simd_max(omax), min.simd_min(omin)))
         .unwrap();
 
     let mut max = max.reduce_max();
     let mut min = min.reduce_min();
 
-    pixels[pixels.len() - rest_len..]
-        .iter()
-        .for_each(|x| {
-            max = max.max(*x);
-            min = min.min(*x);
-        });
+    pixels[pixels.len() - rest_len..].iter().for_each(|x| {
+        max = max.max(*x);
+        min = min.min(*x);
+    });
 
     let slope = (opts.min - opts.max) / (min - max);
     let offset = opts.min - slope * min;
@@ -176,8 +171,8 @@ fn fbm<const LANES: usize>(
     point: [Simd<f32, LANES>; 3],
     noise: &Simplex3d,
 ) -> Sample<LANES, 3>
-    where
-        LaneCount<LANES>: SupportedLaneCount,
+where
+    LaneCount<LANES>: SupportedLaneCount,
 {
     let mut result = Sample::default();
 

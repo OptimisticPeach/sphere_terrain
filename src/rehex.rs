@@ -11,8 +11,12 @@ enum RehexState {
 }
 
 pub fn rehexed(indices: &[u32], len: usize) -> Vec<ArrayVec<[usize; 6]>> {
-    let mut state = std::iter::repeat(RehexState::Empty).take(len).collect::<Vec<_>>();
-    let mut result = std::iter::repeat(ArrayVec::new()).take(len).collect::<Vec<_>>();
+    let mut state = std::iter::repeat(RehexState::Empty)
+        .take(len)
+        .collect::<Vec<_>>();
+    let mut result = std::iter::repeat(ArrayVec::new())
+        .take(len)
+        .collect::<Vec<_>>();
 
     let mut insert = |a: u32, b: u32, c: u32| {
         let (a, b, c) = (a as usize, b as usize, c as usize);

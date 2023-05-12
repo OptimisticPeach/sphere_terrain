@@ -1,13 +1,13 @@
 #![feature(portable_simd)]
 
-use std::sync::atomic::Ordering;
+use crate::noisegen::Opts;
 use atomic_float::AtomicF32;
 use glam::Vec3;
 use hexasphere::shapes::IcoSphere;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::Ordering;
 use tinyvec::ArrayVec;
-use crate::noisegen::Opts;
 
 pub mod noisegen;
 mod rehex;
@@ -84,7 +84,10 @@ impl World {
         let rivers = (0..points.len()).map(|_| AF32::new(0.0)).collect();
         let positions = points.iter().copied().map(Vec3::from).collect::<Vec<_>>();
         let min_dist = calculate_min_dist(&adjacent, &positions);
-        println!("Max distance: {}", calculate_max_dist(&adjacent, &positions));
+        println!(
+            "Max distance: {}",
+            calculate_max_dist(&adjacent, &positions)
+        );
         println!("Min proj distance: {}", min_dist);
 
         Self {
@@ -115,13 +118,8 @@ impl World {
     }
 
     pub fn fill_wetness(&mut self) {
-        self.wetness
-            .iter_mut()
-            .for_each(|x| *x = AF32::new(0.0));
-        self.rivers
-            .iter_mut()
-            .for_each(|x| *x = AF32::new(0.0));
-
+        self.wetness.iter_mut().for_each(|x| *x = AF32::new(0.0));
+        self.rivers.iter_mut().for_each(|x| *x = AF32::new(0.0));
 
         (0..self.positions.len())
             .into_par_iter()
@@ -141,7 +139,8 @@ impl World {
                     self.add_wetness(triangle, bary, water);
                     let gradient = self.gradient_at(triangle, bary);
 
-                    let new_dir = dir * self.settings.inertia - gradient * (1.0 - self.settings.inertia);
+                    let new_dir =
+                        dir * self.settings.inertia - gradient * (1.0 - self.settings.inertia);
                     let new_pos = (pos + new_dir.normalize_or_zero() * self.min_dist).normalize();
 
                     dir = new_dir;
@@ -159,11 +158,9 @@ impl World {
     }
 
     pub fn simulate_node_centered_drops(&self, n: usize, offset: usize) {
-        (offset..(n + offset))
-            .into_par_iter()
-            .for_each(|i: usize| {
-                self.simulate_water_drop(self.positions[i % self.positions.len()]);
-            });
+        (offset..(n + offset)).into_par_iter().for_each(|i: usize| {
+            self.simulate_water_drop(self.positions[i % self.positions.len()]);
+        });
     }
 
     pub fn simulate_water_drop(&self, start: Vec3) {
@@ -188,7 +185,9 @@ impl World {
         for _ in 0..self.settings.max_steps {
             let gradient = self.gradient_at(drop.triangle, drop.bary);
 
-            let new_dir = (drop.dir * self.settings.inertia - gradient * (1.0 - self.settings.inertia)).normalize_or_zero();
+            let new_dir = (drop.dir * self.settings.inertia
+                - gradient * (1.0 - self.settings.inertia))
+                .normalize_or_zero();
 
             let new_pos = (drop.pos + new_dir * self.min_dist).normalize();
             let new_triangle = self.find_triangle(drop.triangle[0], new_pos);
@@ -204,7 +203,10 @@ impl World {
                 self.deposit(drop.triangle, drop.bary, to_deposit);
                 new_sediment -= to_deposit;
             } else {
-                let capacity = (-height_diff).max(self.settings.min_slope) * drop.vel * drop.water * self.settings.capacity;
+                let capacity = (-height_diff).max(self.settings.min_slope)
+                    * drop.vel
+                    * drop.water
+                    * self.settings.capacity;
                 if drop.sediment > capacity {
                     new_sediment *= 1.0 - self.settings.deposition;
                     let to_deposit = drop.sediment * self.settings.deposition;
@@ -218,7 +220,9 @@ impl World {
                 }
             }
 
-            let new_vel = (drop.vel * drop.vel + height_diff * self.settings.gravity).abs().sqrt();
+            let new_vel = (drop.vel * drop.vel + height_diff * self.settings.gravity)
+                .abs()
+                .sqrt();
             let new_water = drop.water * (1.0 - self.settings.evaporation);
 
             drop = Drop {
@@ -256,20 +260,24 @@ impl World {
             adjacent = self.adjacent[guess];
 
             match adjacent.len() {
-                5 => for i in adjacent {
-                    let factor = self.positions[i].dot(point);
-                    if factor > max_val {
-                        max_idx = i;
-                        max_val = factor;
+                5 => {
+                    for i in adjacent {
+                        let factor = self.positions[i].dot(point);
+                        if factor > max_val {
+                            max_idx = i;
+                            max_val = factor;
+                        }
                     }
-                },
-                6 => for i in adjacent {
-                    let factor = self.positions[i].dot(point);
-                    if factor > max_val {
-                        max_idx = i;
-                        max_val = factor;
+                }
+                6 => {
+                    for i in adjacent {
+                        let factor = self.positions[i].dot(point);
+                        if factor > max_val {
+                            max_idx = i;
+                            max_val = factor;
+                        }
                     }
-                },
+                }
                 _ => unreachable!(),
             }
         }
@@ -279,7 +287,7 @@ impl World {
             adjacent
                 .iter()
                 .copied()
-                .map(|x| self.positions[x].dot(point))
+                .map(|x| self.positions[x].dot(point)),
         );
 
         let mut max_idx = 0;
@@ -293,9 +301,17 @@ impl World {
         let prev_idx = (max_idx + around_dots.len() - 1) % around_dots.len();
 
         if around_dots[next_idx] > around_dots[prev_idx] {
-            [guess, self.adjacent[guess][max_idx], self.adjacent[guess][next_idx]]
+            [
+                guess,
+                self.adjacent[guess][max_idx],
+                self.adjacent[guess][next_idx],
+            ]
         } else {
-            [guess, self.adjacent[guess][prev_idx], self.adjacent[guess][max_idx]]
+            [
+                guess,
+                self.adjacent[guess][prev_idx],
+                self.adjacent[guess][max_idx],
+            ]
         }
     }
 
@@ -338,23 +354,23 @@ impl World {
     }
 
     pub fn gradient_at(&self, triangle: [usize; 3], bary: [f32; 3]) -> Vec3 {
-        let sum = bary[0] * self.normalized_gradient(triangle[0]) +
-            bary[1] * self.normalized_gradient(triangle[1]) +
-            bary[2] * self.normalized_gradient(triangle[2]);
+        let sum = bary[0] * self.normalized_gradient(triangle[0])
+            + bary[1] * self.normalized_gradient(triangle[1])
+            + bary[2] * self.normalized_gradient(triangle[2]);
 
         sum.normalize_or_zero()
     }
 
     pub fn height_at(&self, triangle: [usize; 3], bary: [f32; 3]) -> f32 {
-        bary[0] * self.heights[triangle[0]].load() +
-            bary[1] * self.heights[triangle[1]].load() +
-            bary[2] * self.heights[triangle[2]].load()
+        bary[0] * self.heights[triangle[0]].load()
+            + bary[1] * self.heights[triangle[1]].load()
+            + bary[2] * self.heights[triangle[2]].load()
     }
 
     pub fn hardness_at(&self, triangle: [usize; 3], bary: [f32; 3]) -> f32 {
-        bary[0] * self.hardness[triangle[0]].load() +
-            bary[1] * self.hardness[triangle[1]].load() +
-            bary[2] * self.hardness[triangle[2]].load()
+        bary[0] * self.hardness[triangle[0]].load()
+            + bary[1] * self.hardness[triangle[1]].load()
+            + bary[2] * self.hardness[triangle[2]].load()
     }
 }
 
@@ -454,32 +470,24 @@ impl AF32 {
     }
 
     #[inline]
-    pub fn compare_exchange(
-        &self,
-        current: f32,
-        new: f32,
-    ) -> Result<f32, f32> {
-        self.0.compare_exchange(current, new, Ordering::Relaxed, Ordering::Relaxed)
+    pub fn compare_exchange(&self, current: f32, new: f32) -> Result<f32, f32> {
+        self.0
+            .compare_exchange(current, new, Ordering::Relaxed, Ordering::Relaxed)
     }
 
     #[inline]
-    pub fn compare_exchange_weak(
-        &self,
-        current: f32,
-        new: f32,
-    ) -> Result<f32, f32> {
-        self.0.compare_exchange_weak(current, new, Ordering::Relaxed, Ordering::Relaxed)
+    pub fn compare_exchange_weak(&self, current: f32, new: f32) -> Result<f32, f32> {
+        self.0
+            .compare_exchange_weak(current, new, Ordering::Relaxed, Ordering::Relaxed)
     }
 
     #[inline]
-    pub fn fetch_update<F>(
-        &self,
-        update: F,
-    ) -> Result<f32, f32>
-        where
-            F: FnMut(f32) -> Option<f32>,
+    pub fn fetch_update<F>(&self, update: F) -> Result<f32, f32>
+    where
+        F: FnMut(f32) -> Option<f32>,
     {
-        self.0.fetch_update(Ordering::Relaxed, Ordering::Relaxed, update)
+        self.0
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, update)
     }
 
     #[inline]
@@ -512,4 +520,3 @@ impl AF32 {
         self.0.fetch_max(value, Ordering::Relaxed)
     }
 }
-

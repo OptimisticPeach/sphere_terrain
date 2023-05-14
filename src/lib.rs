@@ -12,23 +12,47 @@ use tinyvec::ArrayVec;
 pub mod noisegen;
 mod rehex;
 
+/// Settings for each simulated drop.
+///
+/// If you're not sure where to begin, `Default::default` for this
+/// structure has some nice defaults.
 #[derive(Serialize, Deserialize, Copy, Clone, Debug, PartialEq)]
 pub struct DropSettings {
-    // [0, 1]
+    /// The inertia a drop feels when it is prompted (by way of terrain gradient)
+    /// to change direction. 0 means the drop will always go with the flow of the
+    /// terrain, and 1 means the drop will never change direction.
+    ///
+    /// Reasonable values lie within `[0, 1]`.
     pub inertia: f32,
-    // [0, 32]
+    /// Sediment capacity factor of the drop. Small changes have drastic effects,
+    /// and I'd recommend you keep it at 1.0.
     pub capacity: f32,
-    // [0, 1]
+    /// Controls how much sediment a drop will deposit when its reached more than
+    /// what it can carry.
+    ///
+    /// Reasonable values lie within `[0, 1]`.
     pub deposition: f32,
-    // [0, 1]
+    /// Dictates much erosion will happen as a drop moves through the terrain.
+    ///
+    /// Reasonable values lie within `[0, 1]`.
     pub erosion: f32,
-    // [0, 0.5]
+    /// As drops move, they evaporate exponentially (and hence their capacity
+    /// decreases). At each step, their water content is multiplied by `1.0 - evaporation`.
+    ///
+    /// Reasonable values lie within `[0, 0.5]`.
     pub evaporation: f32,
-    // [0, 0.06]
+    /// If a drop reaches a plateau, it will simply not erode. This value will
+    /// set a minimum amount of erosion to occur.
+    ///
+    /// Reasonable values lie within `[0, 0.06]`.
     pub min_slope: f32,
-    // 10?
+    /// Constant of gravity.
+    ///
+    /// Reasonable value is around 10.
     pub gravity: f32,
-    // 64?
+    /// Determines the number of steps each drop is simulated for.
+    ///
+    /// Reasonable values lie around 20 or so.
     pub max_steps: usize,
 }
 
@@ -38,11 +62,11 @@ impl Default for DropSettings {
             inertia: 0.8,
             capacity: 1.0,
             deposition: 0.23,
-            erosion: 0.53,
+            erosion: 0.001,
             evaporation: 0.27,
             min_slope: 0.01,
             gravity: 9.81,
-            max_steps: 32,
+            max_steps: 30,
         }
     }
 }
@@ -59,15 +83,33 @@ struct Drop {
     bary: [f32; 3],
 }
 
+/// All the data associated with the world.
+///
+/// All `Vec` fields are indexed by indices provided by
+/// the `adjacent` field.
+///
+/// Floating point values are stored as [`AF32`](AF32) so that
+/// atomic operations may be performed and multithreading may
+/// occur.
 pub struct World {
+    /// The height of each tile.
     pub heights: Vec<AF32>,
+    /// The hardness (local "erosion" factor) of each tile.
     pub hardness: Vec<AF32>,
+    /// A measure of how wet a tile is (how much water goes over it)
     pub wetness: Vec<AF32>,
-    pub rivers: Vec<AF32>,
+    /// A measure of how likely a tile is to be a river.
+    pub river_likeliness: Vec<AF32>,
+    /// Which tiles lie adjacent to each tile.
     pub adjacent: Vec<ArrayVec<[usize; 6]>>,
+    /// Positions of the base sphere (unit vectors).
     pub positions: Vec<Vec3>,
+    /// Number of subdivisions.
     pub subdivisions: usize,
+    /// Minimum "distance" between two vectors in their respective projected
+    /// planes tangent to the sphere.
     pub min_dist: f32,
+    /// Settings for each drop.
     pub settings: DropSettings,
 }
 
@@ -94,7 +136,7 @@ impl World {
             heights,
             hardness,
             wetness,
-            rivers,
+            river_likeliness: rivers,
             adjacent,
             positions,
             subdivisions,
@@ -117,9 +159,9 @@ impl World {
             .collect();
     }
 
-    pub fn fill_wetness(&mut self) {
+    pub fn fill_wetness(&mut self, evaporation: f32, inertia: f32) {
         self.wetness.iter_mut().for_each(|x| *x = AF32::new(0.0));
-        self.rivers.iter_mut().for_each(|x| *x = AF32::new(0.0));
+        self.river_likeliness.iter_mut().for_each(|x| *x = AF32::new(0.0));
 
         (0..self.positions.len())
             .into_par_iter()
@@ -140,13 +182,13 @@ impl World {
                     let gradient = self.gradient_at(triangle, bary);
 
                     let new_dir =
-                        dir * self.settings.inertia - gradient * (1.0 - self.settings.inertia);
+                        dir * inertia - gradient * (1.0 - inertia);
                     let new_pos = (pos + new_dir.normalize_or_zero() * self.min_dist).normalize();
 
                     dir = new_dir;
                     pos = new_pos;
                     old_pos = triangle[0];
-                    water *= 1.0 - self.settings.evaporation;
+                    water *= 1.0 - evaporation;
                 }
                 if is_river {
                     for (triangle, bary) in river_pos.iter().copied() {
@@ -213,7 +255,7 @@ impl World {
                     self.deposit(drop.triangle, drop.bary, to_deposit);
                 } else {
                     let hardness = self.hardness_at(drop.triangle, drop.bary);
-                    let to_erode = (capacity - drop.sediment) * hardness;
+                    let to_erode = (capacity - drop.sediment) * hardness * self.settings.erosion;
                     let to_erode = to_erode.min(-height_diff);
                     self.deposit(drop.triangle, drop.bary, -to_erode);
                     new_sediment += to_erode;
@@ -343,7 +385,7 @@ impl World {
 
     pub fn add_river(&self, triangle: [usize; 3], bary: [f32; 3]) {
         for i in 0..3 {
-            self.rivers[triangle[i]].fetch_add(bary[i]);
+            self.river_likeliness[triangle[i]].fetch_add(bary[i]);
         }
     }
 

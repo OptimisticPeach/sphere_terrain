@@ -5,6 +5,8 @@ use glam::Vec3;
 use rand::SeedableRng;
 use rayon::prelude::*;
 
+// Credited to clatter example: https://github.com/Ralith/clatter/blob/main/examples/demo.rs
+
 /// Compute a patch of fractal brownian motion noise
 #[derive(Copy, Clone, Debug)]
 pub struct Opts {

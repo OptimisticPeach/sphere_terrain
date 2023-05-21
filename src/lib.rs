@@ -95,7 +95,7 @@ pub struct World {
     /// The height of each tile.
     pub heights: Vec<AF32>,
     /// The hardness (local "erosion" factor) of each tile.
-    pub hardness: Vec<AF32>,
+    pub hardness: Vec<f32>,
     /// A measure of how wet a tile is (how much water goes over it)
     pub wetness: Vec<AF32>,
     /// A measure of how likely a tile is to be a river.
@@ -114,6 +114,7 @@ pub struct World {
 }
 
 impl World {
+    /// Creates a new world with the requested drop settings and subdivision count.
     pub fn new(subdivisions: usize, settings: DropSettings) -> Self {
         let icosphere = IcoSphere::new(subdivisions, |_| {});
         let points = icosphere.raw_points();
@@ -126,11 +127,6 @@ impl World {
         let rivers = (0..points.len()).map(|_| AF32::new(0.0)).collect();
         let positions = points.iter().copied().map(Vec3::from).collect::<Vec<_>>();
         let min_dist = calculate_min_dist(&adjacent, &positions);
-        println!(
-            "Max distance: {}",
-            calculate_max_dist(&adjacent, &positions)
-        );
-        println!("Min proj distance: {}", min_dist);
 
         Self {
             heights,
@@ -145,6 +141,7 @@ impl World {
         }
     }
 
+    /// Fills the world's height data with FBM noise generated from the options.
     pub fn fill_noise_heights(&mut self, opts: Opts) {
         self.heights = noisegen::sample_all_noise(&self.positions, opts)
             .into_iter()
@@ -152,14 +149,27 @@ impl World {
             .collect();
     }
 
+    /// Fills the world's hardness data with FBM noise generated from the options.
+    ///
+    /// Reasonable values for this should lie between 0 and 1 (with 1 preventing
+    /// any erosion from occurring).
     pub fn fill_hardness(&mut self, opts: Opts) {
-        self.hardness = noisegen::sample_all_noise(&self.positions, opts)
-            .into_iter()
-            .map(|x| AF32::new(x))
-            .collect();
+        self.hardness = noisegen::sample_all_noise(&self.positions, opts);
     }
 
-    pub fn fill_wetness(&mut self, evaporation: f32, inertia: f32) {
+    /// Fills the world's wetness and river values by running a non-eroding simulation
+    /// from every tile on the world.
+    ///
+    /// River values are only added if a point can reach a source of water (height <
+    /// 1.0) within `steps` steps.
+    ///
+    /// - Use the evaporation factor to determine how long runoffs produce wetness for.
+    /// - Use the steps parameter to tweak how long steps will be taken to determine if
+    /// a path is a viable river.
+    /// - The inertia factor here is identical in function to the one in `DropSettings`,
+    /// and is used instead of the `DropSettings` inertia. (This allows the look and
+    /// feel of the terrain to be tweaked).
+    pub fn fill_wetness(&mut self, evaporation: f32, inertia: f32, steps: usize) {
         self.wetness.iter_mut().for_each(|x| *x = AF32::new(0.0));
         self.river_likeliness.iter_mut().for_each(|x| *x = AF32::new(0.0));
 
@@ -173,7 +183,7 @@ impl World {
                 let mut pos = self.positions[i];
                 let mut dir = Vec3::ZERO;
                 let mut water = 1.0;
-                for _ in 0..self.settings.max_steps {
+                for _ in 0..steps {
                     let triangle = self.find_triangle(old_pos, pos);
                     let bary = self.barycentric_coords(pos, triangle);
                     is_river |= self.heights[triangle[0]].load() < 1.0;
@@ -199,15 +209,26 @@ impl World {
             });
     }
 
+    /// Simulates `n` tile/node-centered eroding drops on the world.
+    ///
+    /// This does one drop on each tile in "order", so that each tile will get the same
+    /// number of drops landing on it originally.
+    ///
+    /// `offset` dictates at what index to begin to simulate drops. This is used to avoid
+    /// repeatedly simulating drops at the same area (say you simulate 100 drops 20 times
+    /// with offset 0; you'd get all 2000 drops spawning on the same 100 tiles).
     pub fn simulate_node_centered_drops(&self, n: usize, offset: usize) {
         (offset..(n + offset)).into_par_iter().for_each(|i: usize| {
             self.simulate_water_drop(self.positions[i % self.positions.len()]);
         });
     }
 
+    /// Simulates an eroding water drop starting in the direction of `start`.
+    ///
+    /// `start` must not be zero nor infinite.
     pub fn simulate_water_drop(&self, start: Vec3) {
         let start = start.normalize();
-        assert!(start.is_normalized());
+        assert!(!start.is_nan());
 
         let start_triangle = self.find_triangle(0, start);
         let start_bary = self.barycentric_coords(start, start_triangle);
@@ -280,6 +301,7 @@ impl World {
         }
     }
 
+    /// Determines the triangle (trio of nodes) which contains `point`.
     pub fn find_triangle(&self, mut guess: usize, point: Vec3) -> [usize; 3] {
         let mut guess_dot = self.positions[guess].dot(point);
 
@@ -357,10 +379,14 @@ impl World {
         }
     }
 
+    /// Computes the spherical barycentric coordinates for a point `at` relative to a triangle.
+    ///
+    /// The results are only sensible if `at` is normalized.
     pub fn barycentric_coords(&self, at: Vec3, triangle: [usize; 3]) -> [f32; 3] {
         calculate_barycentric_sphere(at, triangle.map(|x| self.positions[x]))
     }
 
+    /// Finds the normalized gradient at a node.
     pub fn normalized_gradient(&self, at: usize) -> Vec3 {
         let me = self.positions[at];
         let height_me = self.heights[at].load();
@@ -377,24 +403,30 @@ impl World {
         sum.normalize()
     }
 
+    /// Deposits `amount` of sediment in the `triangle` at the point specified
+    /// by `bary`.
     pub fn deposit(&self, triangle: [usize; 3], bary: [f32; 3], amount: f32) {
         for i in 0..3 {
             self.heights[triangle[i]].fetch_add(bary[i] * amount);
         }
     }
 
+    /// Notes that the position depicted by `triangle` and `bary` is a river.
     pub fn add_river(&self, triangle: [usize; 3], bary: [f32; 3]) {
         for i in 0..3 {
             self.river_likeliness[triangle[i]].fetch_add(bary[i]);
         }
     }
 
+    /// Deposits `amount` of wetness in the `triangle` at the point specified
+    /// by `bary`.
     pub fn add_wetness(&self, triangle: [usize; 3], bary: [f32; 3], amount: f32) {
         for i in 0..3 {
             self.wetness[triangle[i]].fetch_add(bary[i] * amount);
         }
     }
 
+    /// Finds the gradient at a point.
     pub fn gradient_at(&self, triangle: [usize; 3], bary: [f32; 3]) -> Vec3 {
         let sum = bary[0] * self.normalized_gradient(triangle[0])
             + bary[1] * self.normalized_gradient(triangle[1])
@@ -403,20 +435,26 @@ impl World {
         sum.normalize_or_zero()
     }
 
+    /// Finds the height at a point.
     pub fn height_at(&self, triangle: [usize; 3], bary: [f32; 3]) -> f32 {
         bary[0] * self.heights[triangle[0]].load()
             + bary[1] * self.heights[triangle[1]].load()
             + bary[2] * self.heights[triangle[2]].load()
     }
 
+    /// Finds the hardness at a point.
     pub fn hardness_at(&self, triangle: [usize; 3], bary: [f32; 3]) -> f32 {
-        bary[0] * self.hardness[triangle[0]].load()
-            + bary[1] * self.hardness[triangle[1]].load()
-            + bary[2] * self.hardness[triangle[2]].load()
+        bary[0] * self.hardness[triangle[0]]
+            + bary[1] * self.hardness[triangle[1]]
+            + bary[2] * self.hardness[triangle[2]]
     }
 }
 
+
 #[cfg(feature = "ij")]
+#[doc(hidden)]
+// IntelliJ acts weird on nightly about what fundamental types are copy, so this
+// is used to circumvent this.
 mod ij {
     impl Copy for usize {}
     impl Copy for f32 {}
@@ -435,22 +473,6 @@ fn calculate_min_dist(adjacent: &[ArrayVec<[usize; 6]>], points: &[Vec3]) -> f32
                 .unwrap()
         })
         .min_by(|x, y| x.total_cmp(y))
-        .unwrap()
-}
-
-fn calculate_max_dist(adjacent: &[ArrayVec<[usize; 6]>], points: &[Vec3]) -> f32 {
-    adjacent
-        .iter()
-        .enumerate()
-        .map(|(idx_this, others)| {
-            let pt = points[idx_this];
-            others
-                .iter()
-                .map(|&neighbour| points[neighbour].distance(pt))
-                .max_by(|x, y| x.total_cmp(y))
-                .unwrap()
-        })
-        .max_by(|x, y| x.total_cmp(y))
         .unwrap()
 }
 

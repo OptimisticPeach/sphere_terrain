@@ -2,6 +2,7 @@ use sphere_terrain::noisegen::Opts;
 use sphere_terrain::*;
 use std::hint::black_box;
 
+// Simple benchmark to chuck into a profiler or flamegraph generator.
 fn main() {
     let mut world = World::new(
         80,

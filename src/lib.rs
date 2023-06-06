@@ -192,8 +192,11 @@ impl World {
                     let gradient = self.gradient_at(triangle, bary);
 
                     let new_dir =
-                        dir * inertia - gradient * (1.0 - inertia);
-                    let new_pos = (pos + new_dir.normalize_or_zero() * self.min_dist).normalize();
+                        (dir * inertia - gradient * (1.0 - inertia))
+                            .normalize_or_zero();
+
+                    // Ensures that dir remains on the plane orthogonal to pos.
+                    let (new_dir, new_pos) = apply_rotation_by(new_dir * self.min_dist, pos);
 
                     dir = new_dir;
                     pos = new_pos;
@@ -252,7 +255,8 @@ impl World {
                 - gradient * (1.0 - self.settings.inertia))
                 .normalize_or_zero();
 
-            let new_pos = (drop.pos + new_dir * self.min_dist).normalize();
+            // Ensures that dir remains on the plane orthogonal to pos.
+            let (new_dir, new_pos) = apply_rotation_by(new_dir * self.min_dist, drop.pos);
             let new_triangle = self.find_triangle(drop.triangle[0], new_pos);
             let new_bary = self.barycentric_coords(new_pos, new_triangle);
             let new_height = self.height_at(new_triangle, new_bary);
@@ -493,6 +497,14 @@ fn calculate_barycentric_sphere(v: Vec3, p: [Vec3; 3]) -> [f32; 3] {
     let lengths = [a, b, c].map(Vec3::length);
     let total = lengths[0] + lengths[1] + lengths[2];
     lengths.map(|x| x / total)
+}
+
+fn apply_rotation_by(vel: Vec3, pos: Vec3) -> (Vec3, Vec3) {
+    let sum = vel + pos;
+    let alpha = sum.length();
+    let resulting_pos = sum / alpha;
+    let resulting_vel = resulting_pos - alpha * pos;
+    (resulting_vel, resulting_pos)
 }
 
 pub struct AF32(pub AtomicF32);

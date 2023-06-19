@@ -454,16 +454,6 @@ impl World {
     }
 }
 
-
-#[cfg(feature = "ij")]
-#[doc(hidden)]
-// IntelliJ acts weird on nightly about what fundamental types are copy, so this
-// is used to circumvent this.
-mod ij {
-    impl Copy for usize {}
-    impl Copy for f32 {}
-}
-
 fn calculate_min_dist(adjacent: &[ArrayVec<[usize; 6]>], points: &[Vec3]) -> f32 {
     adjacent
         .iter()

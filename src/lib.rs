@@ -94,6 +94,9 @@ struct Drop {
 pub struct World {
     /// The height of each tile.
     pub heights: Vec<AF32>,
+
+    pub delta_height: Vec<AF32>,
+
     /// The hardness (local "erosion" factor) of each tile.
     pub hardness: Vec<f32>,
     /// A measure of how wet a tile is (how much water goes over it)
@@ -130,6 +133,7 @@ impl World {
 
         Self {
             heights,
+            delta_height: vec![AF32::new(0.0); points.len()],
             hardness,
             wetness,
             river_likeliness: rivers,
@@ -220,16 +224,72 @@ impl World {
     /// `offset` dictates at what index to begin to simulate drops. This is used to avoid
     /// repeatedly simulating drops at the same area (say you simulate 100 drops 20 times
     /// with offset 0; you'd get all 2000 drops spawning on the same 100 tiles).
-    pub fn simulate_node_centered_drops(&self, n: usize, offset: usize) {
-        (offset..(n + offset)).into_par_iter().for_each(|i: usize| {
-            self.simulate_water_drop(self.positions[i % self.positions.len()]);
-        });
+    pub fn simulate_node_centered_drops(&self, drop_showers: usize, blur_counts: usize) {
+        self.delta_height.iter().for_each(|x| x.store(0.0));
+
+        if blur_counts == 0 {
+            for _ in 0..drop_showers {
+                self.positions
+                    .par_iter()
+                    .for_each(|&x| {
+                        // self.simulate_water_drop(x, &self.heights);
+                        self.simulate_water_drop(x, &self.delta_height);
+                    });
+
+                self.delta_height
+                    .iter()
+                    .map(|x| x.load())
+                    .zip(self.heights.iter())
+                    .for_each(|(x, y)| { y.fetch_add(x); });
+            }
+
+            return;
+        }
+
+        let mut data_delta = vec![AF32::new(0.0); self.adjacent.len()];
+        let mut blurred = vec![AF32::new(0.0); self.adjacent.len()];
+        for _ in 0..drop_showers {
+            self.positions
+                .par_iter()
+                .for_each(|&x| {
+                    self.simulate_water_drop(x, &data_delta);
+                });
+
+            for _ in 0..blur_counts - 1 {
+                self.blur_apply(&data_delta, &blurred);
+                std::mem::swap(&mut data_delta, &mut blurred);
+                blurred.fill(AF32::new(0.0));
+            }
+            self.blur_apply(&data_delta, &self.heights);
+            self.blur_apply(&data_delta, &self.delta_height);
+        }
+    }
+
+    fn blur_apply(&self, from: &[AF32], to: &[AF32]) {
+        for (index, (adjacent, into)) in self.adjacent.iter().zip(to.iter()).enumerate() {
+            let my_pos = self.positions[index];
+            let mut total = 1.0;
+            let coeffs = adjacent
+                .iter()
+                .map(|x| (self.positions[*x].dot(my_pos) - 1.0).exp())
+                .collect::<ArrayVec<[f32; 6]>>();
+            total += coeffs.into_iter().sum::<f32>();
+            let mut result = from[index].load();
+            adjacent
+                .iter()
+                .zip(coeffs.into_iter())
+                .for_each(|(x, coeff)| {
+                    result += from[*x].load() * coeff;
+                });
+            result /= total;
+            into.store(result);
+        }
     }
 
     /// Simulates an eroding water drop starting in the direction of `start`.
     ///
     /// `start` must not be zero nor infinite.
-    pub fn simulate_water_drop(&self, start: Vec3) {
+    pub fn simulate_water_drop(&self, start: Vec3, data_delta: &[AF32]) {
         let start = start.normalize();
         assert!(!start.is_nan());
 
@@ -267,7 +327,7 @@ impl World {
 
             if height_diff > 0.0 {
                 let to_deposit = drop.sediment.min(height_diff);
-                self.deposit(drop.triangle, drop.bary, to_deposit);
+                self.deposit(drop.triangle, drop.bary, to_deposit, data_delta);
                 new_sediment -= to_deposit;
             } else {
                 let capacity = (-height_diff).max(self.settings.min_slope)
@@ -277,12 +337,12 @@ impl World {
                 if drop.sediment > capacity {
                     new_sediment *= 1.0 - self.settings.deposition;
                     let to_deposit = drop.sediment * self.settings.deposition;
-                    self.deposit(drop.triangle, drop.bary, to_deposit);
+                    self.deposit(drop.triangle, drop.bary, to_deposit, data_delta);
                 } else {
                     let hardness = self.hardness_at(drop.triangle, drop.bary);
                     let to_erode = (capacity - drop.sediment) * hardness * self.settings.erosion;
                     let to_erode = to_erode.min(-height_diff);
-                    self.deposit(drop.triangle, drop.bary, -to_erode);
+                    self.deposit(drop.triangle, drop.bary, -to_erode, data_delta);
                     new_sediment += to_erode;
                 }
             }
@@ -409,9 +469,9 @@ impl World {
 
     /// Deposits `amount` of sediment in the `triangle` at the point specified
     /// by `bary`.
-    pub fn deposit(&self, triangle: [usize; 3], bary: [f32; 3], amount: f32) {
+    pub fn deposit(&self, triangle: [usize; 3], bary: [f32; 3], amount: f32, into: &[AF32]) {
         for i in 0..3 {
-            self.heights[triangle[i]].fetch_add(bary[i] * amount);
+            into[triangle[i]].fetch_add(bary[i] * amount);
         }
     }
 
@@ -498,6 +558,12 @@ fn apply_rotation_by(vel: Vec3, pos: Vec3) -> (Vec3, Vec3) {
 }
 
 pub struct AF32(pub AtomicF32);
+
+impl Clone for AF32 {
+    fn clone(&self) -> Self {
+        Self::new(self.load())
+    }
+}
 
 impl AF32 {
     #[inline]

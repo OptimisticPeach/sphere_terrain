@@ -265,7 +265,7 @@ impl World {
         }
     }
 
-    fn blur_apply(&self, from: &[AF32], to: &[AF32]) {
+    pub fn blur_apply(&self, from: &[AF32], to: &[AF32]) {
         for (index, (adjacent, into)) in self.adjacent.iter().zip(to.iter()).enumerate() {
             let my_pos = self.positions[index];
             let mut total = 1.0;
@@ -282,7 +282,7 @@ impl World {
                     result += from[*x].load() * coeff;
                 });
             result /= total;
-            into.store(result);
+            into.fetch_add(result);
         }
     }
 
@@ -367,6 +367,9 @@ impl World {
 
     /// Determines the triangle (trio of nodes) which contains `point`.
     pub fn find_triangle(&self, mut guess: usize, point: Vec3) -> [usize; 3] {
+        if guess >= self.positions.len() {
+            guess = 0;
+        }
         let mut guess_dot = self.positions[guess].dot(point);
 
         let mut adjacent = self.adjacent[guess];

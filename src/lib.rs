@@ -94,9 +94,6 @@ struct Drop {
 pub struct World {
     /// The height of each tile.
     pub heights: Vec<AF32>,
-
-    pub delta_height: Vec<AF32>,
-
     /// The hardness (local "erosion" factor) of each tile.
     pub hardness: Vec<f32>,
     /// A measure of how wet a tile is (how much water goes over it)
@@ -133,7 +130,6 @@ impl World {
 
         Self {
             heights,
-            delta_height: vec![AF32::new(0.0); points.len()],
             hardness,
             wetness,
             river_likeliness: rivers,
@@ -216,31 +212,29 @@ impl World {
             });
     }
 
-    /// Simulates `n` tile/node-centered eroding drops on the world.
+    /// Simulates `drop_showers` number of drops per tile on the sphere.
     ///
-    /// This does one drop on each tile in "order", so that each tile will get the same
-    /// number of drops landing on it originally.
+    /// For every shower, the delta values are computed, blurred `blur_counts` number of times
+    /// and applied before moving onto the next shower. Hence, the following are equivalent:
     ///
-    /// `offset` dictates at what index to begin to simulate drops. This is used to avoid
-    /// repeatedly simulating drops at the same area (say you simulate 100 drops 20 times
-    /// with offset 0; you'd get all 2000 drops spawning on the same 100 tiles).
+    /// ```rs
+    /// world.simulate_node_centered_drops(1, 1);
+    /// world.simulate_node_centered_drops(1, 1);
+    /// ```
+    /// And
+    /// ```rs
+    /// world.simulate_node_centered_drops(2, 1);
+    /// ```
+    ///
+    /// Note that this has a fast-track for 0 blur passes.
     pub fn simulate_node_centered_drops(&self, drop_showers: usize, blur_counts: usize) {
-        self.delta_height.iter().for_each(|x| x.store(0.0));
-
         if blur_counts == 0 {
             for _ in 0..drop_showers {
                 self.positions
                     .par_iter()
                     .for_each(|&x| {
-                        // self.simulate_water_drop(x, &self.heights);
-                        self.simulate_water_drop(x, &self.delta_height);
+                        self.simulate_water_drop(x, &self.heights);
                     });
-
-                self.delta_height
-                    .iter()
-                    .map(|x| x.load())
-                    .zip(self.heights.iter())
-                    .for_each(|(x, y)| { y.fetch_add(x); });
             }
 
             return;
@@ -261,34 +255,58 @@ impl World {
                 blurred.fill(AF32::new(0.0));
             }
             self.blur_apply(&data_delta, &self.heights);
-            self.blur_apply(&data_delta, &self.delta_height);
         }
     }
 
+    /// Uses the world's positions to compute a very small gaussian kernel to
+    /// blur the data locally. The exact radius depends on the particular node,
+    /// however a node will always affect exactly one "layer" of neighbours.
+    ///
+    /// The reason for this API existing is that actually traversing a graph structure
+    /// for multiple nodes is very expensive (like one might for a large kernel).
+    /// Hence this allows you to emulate a large kernel by applying a small one
+    /// repeatedly.
     pub fn blur_apply(&self, from: &[AF32], to: &[AF32]) {
         for (index, (adjacent, into)) in self.adjacent.iter().zip(to.iter()).enumerate() {
             let my_pos = self.positions[index];
             let mut total = 1.0;
-            let coeffs = adjacent
-                .iter()
-                .map(|x| (self.positions[*x].dot(my_pos) - 1.0).exp())
-                .collect::<ArrayVec<[f32; 6]>>();
-            total += coeffs.into_iter().sum::<f32>();
-            let mut result = from[index].load();
-            adjacent
-                .iter()
-                .zip(coeffs.into_iter())
-                .for_each(|(x, coeff)| {
-                    result += from[*x].load() * coeff;
-                });
-            result /= total;
-            into.fetch_add(result);
+
+            if adjacent.len() == 6 {
+                let mut coeffs = [0.0; 6];
+                for i in 0..6 {
+                    coeffs[i] = (self.positions[adjacent[i]].dot(my_pos) - 1.0).exp();
+                }
+                for coeff in coeffs {
+                    total += coeff;
+                }
+                let mut result = from[index].load();
+                for i in 0..6 {
+                    result += from[adjacent[i]].load() * coeffs[i];
+                }
+                into.fetch_add(result / total);
+            } else if adjacent.len() == 5 {
+                let mut coeffs = [0.0; 5];
+                for i in 0..5 {
+                    coeffs[i] = (self.positions[adjacent[i]].dot(my_pos) - 1.0).exp();
+                }
+                for coeff in coeffs {
+                    total += coeff;
+                }
+                let mut result = from[index].load();
+                for i in 0..5 {
+                    result += from[adjacent[i]].load() * coeffs[i];
+                }
+                into.fetch_add(result / total);
+            } else {
+                unreachable!();
+            }
         }
     }
 
     /// Simulates an eroding water drop starting in the direction of `start`.
     ///
-    /// `start` must not be zero nor infinite.
+    /// - `start` must not be zero nor infinite.
+    /// - Delta heights for each tile are stored into `data_delta`.
     pub fn simulate_water_drop(&self, start: Vec3, data_delta: &[AF32]) {
         let start = start.normalize();
         assert!(!start.is_nan());

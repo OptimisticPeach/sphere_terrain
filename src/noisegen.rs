@@ -34,6 +34,12 @@ pub fn sample_all_noise(points: &[Vec3], opts: Opts) -> Vec<f32> {
     output
 }
 
+#[cfg(target_arch = "wasm32")]
+fn generate(opts: Opts, samples: &[Vec3], pixels: &mut Vec<f32>) {
+    generate_inner::<4>(opts, samples, pixels);
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 fn generate(opts: Opts, samples: &[Vec3], pixels: &mut Vec<f32>) {
     if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
         unsafe {
@@ -48,11 +54,13 @@ fn generate(opts: Opts, samples: &[Vec3], pixels: &mut Vec<f32>) {
     }
 }
 
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn generate_avx2(opts: Opts, samples: &[Vec3], pixels: &mut Vec<f32>) {
     generate_inner::<8>(opts, samples, pixels);
 }
 
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "sse4.2")]
 unsafe fn generate_sse(opts: Opts, samples: &[Vec3], pixels: &mut Vec<f32>) {
     generate_inner::<4>(opts, samples, pixels);

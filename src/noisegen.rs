@@ -25,6 +25,7 @@ pub struct Opts {
     pub sample_scale: f32,
     /// Seeds the rng
     pub seed: u32,
+    #[serde(default)]
     /// Offsets the noise sampling
     pub offset: Vec3,
 }

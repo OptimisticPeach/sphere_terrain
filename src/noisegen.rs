@@ -4,11 +4,12 @@ use clatter::{Sample, Simplex3d};
 use glam::Vec3;
 use rand::SeedableRng;
 use rayon::prelude::*;
+use serde::{Serialize, Deserialize};
 
 // Credited to clatter example: https://github.com/Ralith/clatter/blob/main/examples/demo.rs
 
 /// Compute a patch of fractal brownian motion noise
-#[derive(Copy, Clone, Debug)]
+#[derive(Serialize, Deserialize, Copy, Clone, Debug)]
 pub struct Opts {
     /// Number of times to sample the noise
     pub octaves: usize,

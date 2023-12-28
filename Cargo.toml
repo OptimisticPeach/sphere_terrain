@@ -10,7 +10,7 @@ authors = ["Patrik Buhring <patrikbuhring@gmail.com>"]
 glam = { version = "0.24.0", features = ["serde"] }
 hexasphere = "=9.1.0"
 rand = "0.8.5"
-clatter = { git = "https://github.com/Ralith/clatter", features = ["rand"] }
+clatter = { git = "https://github.com/Ralith/clatter", features = ["rand"], rev = "8e68f57719f44de62c11e9845ac382f0e04cd0e3" }
 tinyvec = "1.6.0"
 serde = { version = "1", features = ["derive"] }
 kiddo = "2.0.2"

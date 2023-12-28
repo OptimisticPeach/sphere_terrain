@@ -11,6 +11,7 @@ use tinyvec::ArrayVec;
 
 pub mod noisegen;
 mod rehex;
+pub mod chunked;
 
 /// Settings for each simulated drop.
 ///
@@ -111,6 +112,8 @@ pub struct World {
     pub min_dist: f32,
     /// Settings for each drop.
     pub settings: DropSettings,
+    /// Chunks in this world
+    pub chunks: Vec<usize>,
 }
 
 impl World {
@@ -118,13 +121,16 @@ impl World {
     pub fn new(subdivisions: usize, settings: DropSettings) -> Self {
         let icosphere = IcoSphere::new(subdivisions, |_| {});
         let points = icosphere.raw_points();
-        let indices = icosphere.get_all_indices();
-        let adjacent = rehex::rehexed(&indices, points.len());
 
-        let heights = Vec::new();
-        let hardness = Vec::new();
-        let wetness = (0..points.len()).map(|_| AF32::new(0.0)).collect();
-        let rivers = (0..points.len()).map(|_| AF32::new(0.0)).collect();
+        let num_points = points.len();
+
+        let indices = icosphere.get_all_indices();
+        let adjacent = rehex::rehexed(&indices, num_points);
+
+        let heights = (0..num_points).map(|_| AF32::new(0.0)).collect();
+        let hardness = (0..num_points).map(|_| 0.0).collect();
+        let wetness = (0..num_points).map(|_| AF32::new(0.0)).collect();
+        let rivers = (0..num_points).map(|_| AF32::new(0.0)).collect();
         let positions = points.iter().copied().map(Vec3::from).collect::<Vec<_>>();
         let min_dist = calculate_min_dist(&adjacent, &positions);
 
@@ -138,6 +144,67 @@ impl World {
             subdivisions,
             min_dist,
             settings,
+            chunks: vec![num_points],
+        }
+    }
+
+    pub fn new_chunked(subdivisions: usize, settings: DropSettings, ratio: f32) -> Self {
+        let ratio = ratio.clamp(0.0, 1.0);
+
+        let icosphere = IcoSphere::new(subdivisions, |_| {});
+        let points = icosphere.raw_points();
+
+        let num_points = points.len();
+
+        let indices = icosphere.get_all_indices();
+        let mut adjacent = rehex::rehexed(&indices, num_points);
+
+        let per_chunk = (ratio * num_points as f32) as usize;
+        let per_chunk = per_chunk.clamp(1, num_points);
+
+        let mut points = points.iter().copied().map(Vec3::from).collect::<Vec<_>>();
+
+        let chunks = chunked::make_chunks(&mut adjacent, &mut points, per_chunk);
+
+        let heights = (0..num_points).map(|_| AF32::new(0.0)).collect();
+        let hardness = (0..num_points).map(|_| 0.0).collect();
+        let wetness = (0..num_points).map(|_| AF32::new(0.0)).collect();
+        let rivers = (0..num_points).map(|_| AF32::new(0.0)).collect();
+        let min_dist = calculate_min_dist(&adjacent, &points);
+
+        Self {
+            heights,
+            hardness,
+            wetness,
+            river_likeliness: rivers,
+            adjacent,
+            positions: points,
+            subdivisions,
+            min_dist,
+            settings,
+            chunks,
+        }
+    }
+
+    pub fn get_chunk(&'_ self, chunk: usize) -> WorldSlice<'_> {
+        let start = if chunk == 0 {
+            0
+        } else {
+            self.chunks[chunk - 1]
+        };
+
+        let range = start..self.chunks[chunk];
+
+        WorldSlice {
+            heights: &self.heights[range.clone()],
+            hardness: &self.hardness[range.clone()],
+            wetness: &self.wetness[range.clone()],
+            river_likeliness: &self.river_likeliness[range.clone()],
+            adjacent: &self.adjacent[range.clone()],
+            positions: &self.positions[range.clone()],
+            subdivisions: self.subdivisions,
+            min_dist: self.min_dist,
+            settings: &self.settings,
         }
     }
 
@@ -383,6 +450,50 @@ impl World {
         }
     }
 
+    pub fn find_chunk_of_tile(&self, tile: usize) -> usize {
+        let (Ok(x) | Err(x)) = self.chunks.binary_search(&tile);
+        x
+    }
+
+    pub fn find_chunk_of(&self, point: Vec3) -> usize {
+        if self.chunks.len() == 1 {
+            return 0;
+        }
+
+        let mut best_idx = 0;
+        let mut best_dot = f32::NEG_INFINITY;
+
+        let mut current_tile = 0;
+        let mut current_idx = 0;
+        for (idx, &tile) in self.chunks.iter().enumerate() {
+            let current_dot = point.dot(self.positions[current_tile]);
+            if current_dot > best_dot {
+                best_idx = current_idx;
+                best_dot = current_dot;
+            }
+            current_idx = idx + 1;
+            current_tile = tile;
+        }
+
+        best_idx
+    }
+
+    /// Determines the triangle which contains `point` using
+    /// the chunks of this `World` as a guess.
+    ///
+    /// Obviously this won't be efficient if:
+    /// - There are too many chunks (like if every tile gets its own chunk)
+    /// - There is only one chunk (like if this `World` was created with [`World::new`])
+    pub fn find_chunked_triangle(&self, point: Vec3) -> [usize; 3] {
+        let best_chunk = self.find_chunk_of(point);
+
+        if best_chunk == 0 {
+            self.find_triangle(0, point)
+        } else {
+            self.find_triangle(self.chunks[best_chunk], point)
+        }
+    }
+
     /// Determines the triangle (trio of nodes) which contains `point`.
     pub fn find_triangle(&self, mut guess: usize, point: Vec3) -> [usize; 3] {
         if guess >= self.positions.len() {
@@ -533,6 +644,18 @@ impl World {
             + bary[1] * self.hardness[triangle[1]]
             + bary[2] * self.hardness[triangle[2]]
     }
+}
+
+pub struct WorldSlice<'a> {
+    pub heights: &'a [AF32],
+    pub hardness: &'a [f32],
+    pub wetness: &'a [AF32],
+    pub river_likeliness: &'a [AF32],
+    pub adjacent: &'a [ArrayVec<[usize; 6]>],
+    pub positions: &'a [Vec3],
+    pub subdivisions: usize,
+    pub min_dist: f32,
+    pub settings: &'a DropSettings,
 }
 
 fn calculate_min_dist(adjacent: &[ArrayVec<[usize; 6]>], points: &[Vec3]) -> f32 {
